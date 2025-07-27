@@ -48,6 +48,7 @@ contradictions_report.md
 contradictions_detailed_report.md
 *.pdf
 pdf/
+result.md
 
 # Conda
 Miniconda3-latest-*.sh
