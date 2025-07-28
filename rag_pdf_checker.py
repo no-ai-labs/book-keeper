@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-RAG PDF Checker - Software Design Book Contradiction Detector
-This tool analyzes PDF chapters for logical contradictions using RAG and vector similarity.
+Book Keeper v2.0 - Comprehensive PDF Quality Analyzer
 """
 
 import os
-import re
+import sys
 import json
 import logging
-import time
-from typing import List, Dict, Tuple, Optional
-from dataclasses import dataclass
+import argparse
+from typing import List, Dict, Any, Optional, Set
+from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from pathlib import Path
-import hashlib
 
+# Import existing modules
+from pdfplumber import PDF
 import pdfplumber
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
@@ -23,8 +23,17 @@ from tqdm import tqdm
 from colorama import init, Fore, Style
 from dotenv import load_dotenv
 
-# Initialize colorama for colored output
-init()
+# Import analyzers
+from analyzers import (
+    ContradictionAnalyzer,
+    FlowAnalyzer,
+    RedundancyAnalyzer,
+    CodeAnalyzer,
+    TheoryAnalyzer
+)
+
+# Initialize colorama
+init(autoreset=True)
 
 # Load environment variables
 load_dotenv()
@@ -32,632 +41,732 @@ load_dotenv()
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('book_keeper_v2.log'),
+        logging.StreamHandler()
+    ]
 )
-logger = logging.getLogger(__name__)
 
+logger = logging.getLogger(__name__)
 
 @dataclass
 class Chapter:
-    """Represents a chapter from the PDF"""
-    pdf_name: str
-    chapter_number: str
+    """Represents a chapter extracted from PDF"""
+    file_name: str
+    file_hash: str
+    chapter_number: int
     title: str
-    content: str
+    text: str
     page_start: int
     page_end: int
     
     def get_id(self) -> str:
-        """Generate unique ID for the chapter"""
-        content_hash = hashlib.md5(self.content.encode()).hexdigest()[:8]
-        return f"{self.pdf_name}_{self.chapter_number}_{content_hash}"
-
+        """Generate unique chapter ID"""
+        return f"{self.file_hash[:8]}_{self.chapter_number}"
 
 @dataclass
-class Contradiction:
-    """Represents a detected contradiction between documents/segments"""
-    doc1_id: str
-    doc2_id: str
-    doc1_excerpt: str
-    doc2_excerpt: str
-    contradiction_type: str
-    explanation: str
-    confidence_score: float
-
+class ComprehensiveReport:
+    """Comprehensive quality analysis report"""
+    generated_at: str
+    total_chapters: int
+    check_types: List[str]
+    
+    # Analysis results
+    contradictions: Optional[List[Dict[str, Any]]] = None
+    flow_issues: Optional[List[Dict[str, Any]]] = None
+    redundancies: Optional[List[Dict[str, Any]]] = None
+    code_errors: Optional[List[Dict[str, Any]]] = None
+    theory_deviations: Optional[List[Dict[str, Any]]] = None
+    
+    # Overall scores
+    overall_score: float = 0.0
+    subscores: Dict[str, float] = field(default_factory=dict)
+    
+    # Summary
+    summary: Dict[str, Any] = field(default_factory=dict)
 
 class PDFChapterExtractor:
-    """Extracts chapters from PDF files"""
+    """Extract chapters from PDF files"""
     
-    # Common chapter patterns in various languages
     CHAPTER_PATTERNS = [
-        r'(?:Chapter|CHAPTER)\s+(\d+|[IVX]+)',  # English with numbers or Roman
-        r'(\d+)\s*장',  # Korean
-        r'제\s*(\d+)\s*장',  # Korean alternative
-        r'Chapter\s*(\d+)\s*[:\-.]',  # Chapter with punctuation
-        r'^\s*(\d+)\.\s+',  # Simple numbering (1. Title)
-        r'PART\s+(\d+|[IVX]+)',  # Part instead of chapter
+        r'(?:Chapter|CHAPTER)\s+(\d+)',
+        r'제?\s*(\d+)\s*장',
+        r'^(\d+)\.\s+',
+        r'PART\s+(\d+)'
     ]
     
     def extract_chapters(self, pdf_path: str) -> List[Chapter]:
         """Extract chapters from a PDF file"""
         chapters = []
-        pdf_name = Path(pdf_path).stem
+        file_name = os.path.basename(pdf_path)
+        file_hash = self._generate_file_hash(pdf_path)
         
-        try:
-            with pdfplumber.open(pdf_path) as pdf:
-                # Extract all text with page numbers
-                pages_text = []
-                for i, page in enumerate(pdf.pages):
-                    text = page.extract_text() or ""
-                    pages_text.append((i + 1, text))
-                
-                # Find chapter boundaries
-                chapter_starts = self._find_chapter_starts(pages_text)
-                
-                # Extract chapters based on boundaries
-                for i, (page_num, chapter_match) in enumerate(chapter_starts):
-                    # Determine end page
-                    if i + 1 < len(chapter_starts):
-                        end_page = chapter_starts[i + 1][0] - 1
-                    else:
-                        end_page = len(pdf.pages)  # Total number of pages
-                    
-                    # Collect chapter content
-                    chapter_content = []
-                    for page_idx in range(page_num - 1, end_page):
-                        if page_idx < len(pages_text):
-                            chapter_content.append(pages_text[page_idx][1])
-                    
-                    content = '\n'.join(chapter_content)
-                    
-                    # Extract chapter title (first few lines after chapter marker)
-                    lines = content.split('\n')
-                    title = ' '.join(lines[:3]).strip()[:100]  # First 3 lines, max 100 chars
-                    
-                    chapter = Chapter(
-                        pdf_name=pdf_name,
-                        chapter_number=chapter_match,
-                        title=title,
-                        content=content,
-                        page_start=page_num,
-                        page_end=end_page
-                    )
-                    chapters.append(chapter)
-                    
-                logger.info(f"Extracted {len(chapters)} chapters from {pdf_name}")
-                
-        except Exception as e:
-            logger.error(f"Error extracting chapters from {pdf_path}: {e}")
+        with pdfplumber.open(pdf_path) as pdf:
+            current_chapter = None
+            chapter_text = []
+            chapter_start_page = 0
             
+            for page_num, page in enumerate(pdf.pages):
+                text = page.extract_text() or ""
+                
+                # Check for chapter markers
+                chapter_match = self._find_chapter_marker(text)
+                
+                if chapter_match:
+                    # Save previous chapter if exists
+                    if current_chapter is not None:
+                        chapters.append(Chapter(
+                            file_name=file_name,
+                            file_hash=file_hash,
+                            chapter_number=current_chapter['number'],
+                            title=current_chapter['title'],
+                            text='\n'.join(chapter_text),
+                            page_start=chapter_start_page,
+                            page_end=page_num - 1
+                        ))
+                    
+                    # Start new chapter
+                    current_chapter = chapter_match
+                    chapter_text = [text]
+                    chapter_start_page = page_num
+                else:
+                    # Continue current chapter
+                    chapter_text.append(text)
+            
+            # Save last chapter
+            if current_chapter is not None:
+                chapters.append(Chapter(
+                    file_name=file_name,
+                    file_hash=file_hash,
+                    chapter_number=current_chapter['number'],
+                    title=current_chapter['title'],
+                    text='\n'.join(chapter_text),
+                    page_start=chapter_start_page,
+                    page_end=len(pdf.pages) - 1
+                ))
+        
         return chapters
     
-    def _find_chapter_starts(self, pages_text: List[Tuple[int, str]]) -> List[Tuple[int, str]]:
-        """Find chapter start positions in the PDF"""
-        chapter_starts = []
+    def _find_chapter_marker(self, text: str) -> Optional[Dict[str, Any]]:
+        """Find chapter markers in text"""
+        import re
         
-        for page_num, text in pages_text:
-            # Check each line for chapter patterns
-            lines = text.split('\n')[:10]  # Check first 10 lines of each page
-            
-            for line in lines:
-                for pattern in self.CHAPTER_PATTERNS:
-                    match = re.search(pattern, line, re.IGNORECASE)
-                    if match:
-                        # Extract chapter number from the first capturing group
-                        if match.groups():
-                            chapter_num = match.group(1)
-                        else:
-                            chapter_num = str(len(chapter_starts) + 1)
-                        chapter_starts.append((page_num, chapter_num))
-                        break
-                else:
-                    continue
-                break
+        lines = text.split('\n')[:10]  # Check first 10 lines
         
-        return chapter_starts
-
-
-class EmbeddingManager:
-    """Manages text embeddings using OpenAI or HuggingFace"""
+        for line in lines:
+            for pattern in self.CHAPTER_PATTERNS:
+                match = re.search(pattern, line)
+                if match:
+                    return {
+                        'number': int(match.group(1)),
+                        'title': line.strip()
+                    }
+        return None
     
-    def __init__(self, model_type: str = "openai"):
-        self.model_type = model_type
-        
-        if model_type == "openai":
-            self.client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-            self.embedding_model = "text-embedding-3-small"
-            self.embedding_dim = 1536  # text-embedding-3-small dimension
-        else:
-            # HuggingFace implementation can be added here
-            raise NotImplementedError("HuggingFace embeddings not yet implemented")
-    
-    def get_embedding(self, text: str) -> List[float]:
-        """Get embedding for text"""
-        try:
-            # Truncate text if too long (OpenAI has token limits)
-            if len(text) > 8000:
-                text = text[:8000]
-                
-            response = self.client.embeddings.create(
-                input=text,
-                model=self.embedding_model
-            )
-            return response.data[0].embedding
-            
-        except Exception as e:
-            logger.error(f"Error getting embedding: {e}")
-            return [0.0] * self.embedding_dim
-
+    def _generate_file_hash(self, file_path: str) -> str:
+        """Generate hash for file identification"""
+        import hashlib
+        return hashlib.md5(file_path.encode()).hexdigest()
 
 class VectorStore:
-    """Manages Qdrant vector database operations"""
+    """Manage vector embeddings in Qdrant"""
     
-    def __init__(self, collection_name: str = "book_chapters"):
+    def __init__(self, host: str = "localhost", port: int = 6345, collection_name: str = "book_keeper_v2"):
+        self.client = QdrantClient(host=host, port=port)
         self.collection_name = collection_name
-        self.client = QdrantClient(
-            host=os.getenv("QDRANT_HOST", "localhost"),
-            port=int(os.getenv("QDRANT_PORT", 6345))
-        )
-        self.embedding_dim = 1536  # OpenAI embedding dimension
-        
-        self._init_collection()
+        self._ensure_collection()
     
-    def _init_collection(self):
-        """Initialize or recreate the collection"""
-        try:
-            # Delete existing collection if exists
-            self.client.delete_collection(self.collection_name)
-        except:
-            pass
-            
-        # Create new collection
-        self.client.create_collection(
-            collection_name=self.collection_name,
-            vectors_config=VectorParams(
-                size=self.embedding_dim,
-                distance=Distance.COSINE
+    def _ensure_collection(self):
+        """Ensure collection exists"""
+        collections = self.client.get_collections().collections
+        if not any(c.name == self.collection_name for c in collections):
+            self.client.create_collection(
+                collection_name=self.collection_name,
+                vectors_config=VectorParams(size=1536, distance=Distance.COSINE)
             )
-        )
-        logger.info(f"Initialized collection: {self.collection_name}")
     
     def add_chapter(self, chapter: Chapter, embedding: List[float]):
-        """Add a chapter with its embedding to the vector store"""
-        # Generate numeric ID from hash
-        chapter_id = abs(hash(chapter.get_id())) % (10 ** 12)
-        
-        point = PointStruct(
-            id=chapter_id,
-            vector=embedding,
-            payload={
-                "chapter_id": chapter.get_id(),
-                "pdf_name": chapter.pdf_name,
-                "chapter_number": chapter.chapter_number,
-                "title": chapter.title,
-                "content": chapter.content[:1000],  # Store first 1000 chars
-                "page_start": chapter.page_start,
-                "page_end": chapter.page_end
-            }
-        )
+        """Add chapter with embedding to vector store"""
+        point_id = hash(chapter.get_id()) % (10 ** 8)
         
         self.client.upsert(
             collection_name=self.collection_name,
-            points=[point]
+            points=[
+                PointStruct(
+                    id=point_id,
+                    vector=embedding,
+                    payload={
+                        "chapter_id": chapter.get_id(),
+                        "file_name": chapter.file_name,
+                        "chapter_number": chapter.chapter_number,
+                        "title": chapter.title,
+                        "text_preview": chapter.text[:500]
+                    }
+                )
+            ]
         )
+
+class EmbeddingManager:
+    """Manage text embeddings"""
     
-    def search_similar(self, query_vector: List[float], limit: int = 5) -> List[Dict]:
-        """Search for similar chapters"""
-        results = self.client.search(
-            collection_name=self.collection_name,
-            query_vector=query_vector,
-            limit=limit
+    def __init__(self, model: str = "text-embedding-3-small"):
+        self.client = OpenAI()
+        self.model = model
+        self.embedding_dim = 1536  # text-embedding-3-small dimension
+    
+    def create_embedding(self, text: str) -> List[float]:
+        """Create embedding for text"""
+        response = self.client.embeddings.create(
+            model=self.model,
+            input=text[:8000]  # Limit text length
         )
-        
-        return [
-            {
-                "id": hit.id,
-                "score": hit.score,
-                "payload": hit.payload
-            }
-            for hit in results
-        ]
+        return response.data[0].embedding
 
-
-class ContradictionDetector:
-    """Detects contradictions between chapters using LLM"""
+class QualityChecker:
+    """Main quality checker orchestrator for v2.0"""
     
-    def __init__(self, model_type="claude"):
-        """Initialize detector with specified model type
+    def __init__(self, model_type: str = "claude"):
+        self.model_type = model_type
+        self.analyzers = {
+            'contradiction': ContradictionAnalyzer(model_type),
+            'flow': FlowAnalyzer(model_type),
+            'redundancy': RedundancyAnalyzer(model_type),
+            'code': CodeAnalyzer(model_type),
+            'theory': TheoryAnalyzer(model_type)
+        }
+        self.logger = logger
+    
+    def check(self, chapters: List[Chapter], 
+              check_types: Optional[List[str]] = None,
+              test_mode: bool = False) -> ComprehensiveReport:
+        """
+        Run quality checks on chapters
         
         Args:
-            model_type: "claude" (default) or "openai"
+            chapters: List of chapters to analyze
+            check_types: Specific checks to run. None means all checks (comprehensive)
+            test_mode: If True, limit analysis scope for testing
         """
-        if model_type == "openai":
-            self.client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-            self.model = "gpt-4o"
-            self.model_type = "openai"
-        elif model_type == "claude":
-            from anthropic import Anthropic
-            self.client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
-            self.model = "claude-sonnet-4-20250514"
-            self.model_type = "claude"
-        else:
-            raise ValueError(f"Unsupported model type: {model_type}")
+        if check_types is None:
+            check_types = list(self.analyzers.keys())
+        
+        self.logger.info(f"Running quality checks: {', '.join(check_types)}")
+        
+        # Limit scope in test mode
+        if test_mode:
+            chapters = chapters[:3]  # Only first 3 chapters
+            self.logger.info("Test mode: Analyzing only first 3 chapters")
+        
+        results = {}
+        subscores = {}
+        
+        # Run selected analyzers
+        for check_type in check_types:
+            if check_type in self.analyzers:
+                self.logger.info(f"Running {check_type} analysis...")
+                analyzer = self.analyzers[check_type]
+                
+                # Special handling for redundancy in test mode
+                if check_type == 'redundancy' and test_mode:
+                    # Limit redundancy checks in test mode
+                    limited_chapters = chapters[:2]
+                    result = analyzer.analyze(limited_chapters)
+                else:
+                    result = analyzer.analyze(chapters)
+                
+                # Store results
+                results[check_type] = result.details
+                subscores[check_type] = result.confidence_score
+                
+                # Log summary
+                self.logger.info(f"{check_type.capitalize()}: {result.summary}")
+        
+        # Calculate overall score
+        overall_score = sum(subscores.values()) / len(subscores) if subscores else 0.0
+        
+        # Create summary
+        summary = self._create_summary(results, subscores)
+        
+        # Build report
+        report = ComprehensiveReport(
+            generated_at=datetime.now().isoformat(),
+            total_chapters=len(chapters),
+            check_types=check_types,
+            overall_score=overall_score,
+            subscores=subscores,
+            summary=summary
+        )
+        
+        # Add specific results
+        if 'contradiction' in results:
+            report.contradictions = results['contradiction']
+        if 'flow' in results:
+            report.flow_issues = results['flow']
+        if 'redundancy' in results:
+            report.redundancies = results['redundancy']
+        if 'code' in results:
+            report.code_errors = results['code']
+        if 'theory' in results:
+            report.theory_deviations = results['theory']
+        
+        return report
     
-    def detect_contradiction(self, chapter1: Chapter, chapter2: Chapter) -> Optional[Contradiction]:
-        """Detect if two chapters contain contradictions"""
+    def _create_summary(self, results: Dict[str, List[Dict]], 
+                       subscores: Dict[str, float]) -> Dict[str, Any]:
+        """Create analysis summary"""
+        summary = {
+            "total_issues": sum(len(issues) for issues in results.values()),
+            "issues_by_type": {k: len(v) for k, v in results.items()},
+            "quality_assessment": self._get_quality_assessment(subscores)
+        }
         
-        # Create a focused prompt for contradiction detection
-        # Parse chapter info to avoid confusion
-        ch1_parts = chapter1.chapter_number.split('_')
-        ch2_parts = chapter2.chapter_number.split('_')
+        # Add specific insights
+        insights = []
         
-        # Extract main document name and section
-        ch1_main = ch1_parts[0] if ch1_parts else "Document"
-        ch1_section = ch1_parts[-1] if len(ch1_parts) > 1 and ch1_parts[-1].isdigit() else ""
-        ch2_main = ch2_parts[0] if ch2_parts else "Document"  
-        ch2_section = ch2_parts[-1] if len(ch2_parts) > 1 and ch2_parts[-1].isdigit() else ""
+        if 'contradiction' in results and results['contradiction']:
+            insights.append(f"Found {len(results['contradiction'])} logical contradictions")
         
-        prompt = f"""You are analyzing two text segments from software design documentation for logical contradictions.
-
-First Document: {ch1_main}{f" Section {ch1_section}" if ch1_section else ""}
-Title: {chapter1.title}
-Content excerpt: {chapter1.content[:2000]}
-
-Second Document: {ch2_main}{f" Section {ch2_section}" if ch2_section else ""}
-Title: {chapter2.title}
-Content excerpt: {chapter2.content[:2000]}
-
-Analyze these text segments and identify any logical contradictions. A contradiction occurs when:
-1. One segment states something as true while another states it as false
-2. Incompatible definitions or explanations of the same concept
-3. Conflicting recommendations or best practices
-4. Mutually exclusive claims about the same topic
-
-If you find a contradiction:
-1. Quote the specific contradicting statements from each segment
-2. Explain why they contradict each other
-3. Rate your confidence (0.0-1.0) that this is a real contradiction
-
-Please respond in JSON format with the following structure:
-{{
-    "has_contradiction": true/false,
-    "doc1_excerpt": "exact quote from first document",
-    "doc2_excerpt": "exact quote from second document",
-    "contradiction_type": "definition|recommendation|fact|principle",
-    "explanation": "모순에 대한 상세한 설명을 한글로 작성하세요.",
-    "confidence_score": 0.0-1.0
-}}
-
-IMPORTANT: When referring to the sources in your explanation, use:
-- "첫 번째 문서" or "첫 번째 텍스트" (NOT "첫 번째 챕터" or "1장")
-- "두 번째 문서" or "두 번째 텍스트" (NOT "두 번째 챕터" or "2장")
-- If referring to sections, say "섹션 5" or "섹션 6", NOT "5장" or "6장"
-
-If no contradiction is found, set has_contradiction to false and return the JSON object with empty strings for the other fields.
-"""
+        if 'flow' in results and results['flow']:
+            flow_issues = results['flow']
+            high_severity = len([f for f in flow_issues if f.get('severity') == 'high'])
+            if high_severity > 0:
+                insights.append(f"{high_severity} high-severity flow issues detected")
         
-        try:
-            if self.model_type == "openai":
-                # Add explicit JSON format request to the prompt
-                system_prompt = "You are an expert at analyzing technical documentation for logical consistency. You MUST provide all explanations in Korean (한글)."
-                prompt_with_json = prompt + "\n\nPlease respond in JSON format. IMPORTANT: The 'explanation' field MUST be written in Korean (한글)."
-                
-                response = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": prompt_with_json}
-                    ],
-                    temperature=0.3,
-                    response_format={"type": "json_object"}
-                )
-                
-                result = json.loads(response.choices[0].message.content)
-                
-            elif self.model_type == "claude":
-                # Claude requires different format
-                system_prompt = "You are an expert at analyzing technical documentation for logical consistency. You MUST provide all explanations in Korean (한글). Always respond with valid JSON format only."
-                
-                response = self.client.messages.create(
-                    model=self.model,
-                    max_tokens=4000,
-                    temperature=0.3,
-                    system=system_prompt,
-                    messages=[
-                        {"role": "user", "content": prompt + "\n\nRemember to respond with valid JSON format only."}
-                    ]
-                )
-                
-                # Extract text from response
-                response_text = response.content[0].text if response.content else ""
-                
-                # Claude 4 wraps JSON in ```json code blocks
-                if response_text.strip().startswith("```json"):
-                    response_text = response_text.strip()[7:]  # Remove ```json
-                    if response_text.endswith("```"):
-                        response_text = response_text[:-3]  # Remove closing ```
-                
-                result = json.loads(response_text.strip())
-            
-            if result.get("has_contradiction", False):
-                return Contradiction(
-                    doc1_id=chapter1.get_id(),
-                    doc2_id=chapter2.get_id(),
-                    doc1_excerpt=result.get("doc1_excerpt", ""),
-                    doc2_excerpt=result.get("doc2_excerpt", ""),
-                    contradiction_type=result.get("contradiction_type", "unknown"),
-                    explanation=result.get("explanation", ""),
-                    confidence_score=result.get("confidence_score", 0.5)
-                )
-            
-            return None
-            
-        except Exception as e:
-            logger.error(f"Error detecting contradiction: {e}")
-            return None
-
+        if 'code' in results and results['code']:
+            code_errors = results['code']
+            syntax_errors = len([e for e in code_errors if e.get('error_type') == 'syntax'])
+            if syntax_errors > 0:
+                insights.append(f"{syntax_errors} syntax errors in code examples")
+        
+        summary['key_insights'] = insights
+        
+        return summary
+    
+    def _get_quality_assessment(self, subscores: Dict[str, float]) -> str:
+        """Get overall quality assessment"""
+        avg_score = sum(subscores.values()) / len(subscores) if subscores else 0
+        
+        if avg_score >= 0.9:
+            return "Excellent"
+        elif avg_score >= 0.8:
+            return "Good"
+        elif avg_score >= 0.7:
+            return "Fair"
+        elif avg_score >= 0.6:
+            return "Needs Improvement"
+        else:
+            return "Poor"
 
 class ReportGenerator:
-    """Generates contradiction reports in various formats"""
+    """Generate various report formats"""
     
-    def save_intermediate_results(self, contradictions: List[Contradiction], output_path: str = "contradictions_interim.json"):
-        """Save intermediate results during processing"""
-        report_data = {
-            "generated_at": datetime.now().isoformat(),
-            "status": "in_progress",
-            "total_contradictions": len(contradictions),
-            "contradictions": [
-                {
-                    "doc1_id": c.doc1_id,
-                    "doc2_id": c.doc2_id,
-                    "type": c.contradiction_type,
-                    "confidence": c.confidence_score,
-                    "doc1_excerpt": c.doc1_excerpt,
-                    "doc2_excerpt": c.doc2_excerpt,
-                    "explanation": c.explanation
-                }
-                for c in contradictions
-            ]
-        }
-        
-        with open(output_path, 'w', encoding='utf-8') as f:
-            json.dump(report_data, f, indent=2, ensure_ascii=False)
+    def __init__(self):
+        self.logger = logger
     
-    def generate_json_report(self, contradictions: List[Contradiction], output_path: str = "contradictions.json"):
-        """Generate JSON report of contradictions"""
-        report_data = {
-            "generated_at": datetime.now().isoformat(),
-            "total_contradictions": len(contradictions),
-            "contradictions": [
-                {
-                    "doc1_id": c.doc1_id,
-                    "doc2_id": c.doc2_id,
-                    "type": c.contradiction_type,
-                    "confidence": c.confidence_score,
-                    "doc1_excerpt": c.doc1_excerpt,
-                    "doc2_excerpt": c.doc2_excerpt,
-                    "explanation": c.explanation
-                }
-                for c in contradictions
-            ]
-        }
+    def save_json_report(self, report: ComprehensiveReport, filename: str = "quality_report_v2.json"):
+        """Save report as JSON"""
+        report_dict = asdict(report)
         
-        with open(output_path, 'w', encoding='utf-8') as f:
-            json.dump(report_data, f, indent=2, ensure_ascii=False)
+        with open(filename, 'w', encoding='utf-8') as f:
+            json.dump(report_dict, f, ensure_ascii=False, indent=2)
         
-        logger.info(f"JSON report saved to {output_path}")
+        self.logger.info(f"JSON report saved to {filename}")
     
-    def generate_markdown_report(self, contradictions: List[Contradiction], chapters: Dict[str, Chapter], 
-                                output_path: str = "contradictions_report.md"):
-        """Generate Markdown report of contradictions"""
-        with open(output_path, 'w', encoding='utf-8') as f:
-            f.write("# Book Contradiction Analysis Report\n\n")
-            f.write(f"Generated at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-            f.write(f"Total contradictions found: {len(contradictions)}\n\n")
-            
-            if not contradictions:
-                f.write("✅ No contradictions detected in the analyzed chapters.\n")
-            else:
-                f.write("## Detected Contradictions\n\n")
-                
-                for i, contradiction in enumerate(contradictions, 1):
-                    chapter1 = chapters.get(contradiction.doc1_id)
-                    chapter2 = chapters.get(contradiction.doc2_id)
-                    
-                    f.write(f"### Contradiction {i}\n\n")
-                    f.write(f"**Type:** {contradiction.contradiction_type.title()}\n")
-                    f.write(f"**Confidence:** {contradiction.confidence_score:.2f}\n\n")
-                    
-                    if chapter1:
-                        f.write(f"**Chapter {chapter1.chapter_number}** (Pages {chapter1.page_start}-{chapter1.page_end}):\n")
-                        f.write(f"> {contradiction.doc1_excerpt}\n\n")
-                    
-                    if chapter2:
-                        f.write(f"**Chapter {chapter2.chapter_number}** (Pages {chapter2.page_start}-{chapter2.page_end}):\n")
-                        f.write(f"> {contradiction.doc2_excerpt}\n\n")
-                    
-                    f.write(f"**Explanation:** {contradiction.explanation}\n\n")
-                    f.write("---\n\n")
+    def save_markdown_report(self, report: ComprehensiveReport, 
+                           filename: str = "quality_report_v2.md"):
+        """Save report as Markdown"""
+        lines = [
+            f"# 📊 Book Keeper v2.0 - Comprehensive Quality Report",
+            f"",
+            f"**Generated**: {report.generated_at}",
+            f"**Total Chapters Analyzed**: {report.total_chapters}",
+            f"**Checks Performed**: {', '.join(report.check_types)}",
+            f"",
+            f"## 🎯 Overall Quality Score: {report.overall_score:.2%}",
+            f"",
+            f"### 📈 Subscores",
+            f""
+        ]
         
-        logger.info(f"Markdown report saved to {output_path}")
+        for check_type, score in report.subscores.items():
+            emoji = self._get_score_emoji(score)
+            lines.append(f"- **{check_type.capitalize()}**: {emoji} {score:.2%}")
+        
+        lines.extend([
+            f"",
+            f"## 📋 Summary",
+            f"",
+            f"**Quality Assessment**: {report.summary.get('quality_assessment', 'Unknown')}",
+            f"**Total Issues Found**: {report.summary.get('total_issues', 0)}",
+            f""
+        ])
+        
+        # Key insights
+        if report.summary.get('key_insights'):
+            lines.append("### 🔍 Key Insights")
+            lines.append("")
+            for insight in report.summary['key_insights']:
+                lines.append(f"- {insight}")
+            lines.append("")
+        
+        # Detailed sections
+        if report.contradictions:
+            lines.extend(self._format_contradictions_section(report.contradictions))
+        
+        if report.flow_issues:
+            lines.extend(self._format_flow_section(report.flow_issues))
+        
+        if report.redundancies:
+            lines.extend(self._format_redundancy_section(report.redundancies))
+        
+        if report.code_errors:
+            lines.extend(self._format_code_section(report.code_errors))
+        
+        if report.theory_deviations:
+            lines.extend(self._format_theory_section(report.theory_deviations))
+        
+        # Write report
+        with open(filename, 'w', encoding='utf-8') as f:
+            f.write('\n'.join(lines))
+        
+        self.logger.info(f"Markdown report saved to {filename}")
     
-    def print_summary(self, contradictions: List[Contradiction]):
-        """Print summary to console with colors"""
-        print(f"\n{Fore.CYAN}=== Contradiction Analysis Summary ==={Style.RESET_ALL}\n")
+    def print_summary(self, report: ComprehensiveReport):
+        """Print colored summary to console"""
+        print(f"\n{Fore.CYAN}{'='*60}{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}Book Keeper v2.0 - Analysis Complete{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}{'='*60}{Style.RESET_ALL}\n")
         
-        if not contradictions:
-            print(f"{Fore.GREEN}✅ No contradictions found!{Style.RESET_ALL}")
+        # Overall score with color
+        score_color = self._get_score_color(report.overall_score)
+        print(f"Overall Quality Score: {score_color}{report.overall_score:.2%}{Style.RESET_ALL}")
+        print(f"Quality Assessment: {report.summary.get('quality_assessment', 'Unknown')}\n")
+        
+        # Subscores
+        print(f"{Fore.YELLOW}Detailed Scores:{Style.RESET_ALL}")
+        for check_type, score in report.subscores.items():
+            score_color = self._get_score_color(score)
+            print(f"  {check_type.capitalize()}: {score_color}{score:.2%}{Style.RESET_ALL}")
+        
+        print(f"\n{Fore.YELLOW}Issues Found:{Style.RESET_ALL}")
+        for check_type, count in report.summary.get('issues_by_type', {}).items():
+            if count > 0:
+                print(f"  {check_type.capitalize()}: {Fore.RED}{count}{Style.RESET_ALL}")
+        
+        # Key insights
+        if report.summary.get('key_insights'):
+            print(f"\n{Fore.YELLOW}Key Insights:{Style.RESET_ALL}")
+            for insight in report.summary['key_insights']:
+                print(f"  • {insight}")
+        
+        print(f"\n{Fore.GREEN}✓ Reports saved:{Style.RESET_ALL}")
+        print(f"  - quality_report_v2.json")
+        print(f"  - quality_report_v2.md")
+        print()
+    
+    def _get_score_color(self, score: float):
+        """Get color based on score"""
+        if score >= 0.9:
+            return Fore.GREEN
+        elif score >= 0.7:
+            return Fore.YELLOW
         else:
-            print(f"{Fore.YELLOW}⚠️  Found {len(contradictions)} contradiction(s){Style.RESET_ALL}\n")
-            
-            # Group by type
-            by_type = {}
-            for c in contradictions:
-                by_type.setdefault(c.contradiction_type, []).append(c)
-            
-            for type_name, items in by_type.items():
-                print(f"{Fore.MAGENTA}{type_name.title()}: {len(items)} contradiction(s){Style.RESET_ALL}")
-            
-            print(f"\n{Fore.CYAN}High confidence contradictions (>0.8):{Style.RESET_ALL}")
-            high_conf = [c for c in contradictions if c.confidence_score > 0.8]
-            for c in high_conf[:3]:  # Show top 3
-                print(f"  • Chapters {c.doc1_id.split('_')[1]} vs {c.doc2_id.split('_')[1]}")
-                print(f"    {Fore.RED}{c.explanation[:100]}...{Style.RESET_ALL}")
-
-
-class RAGPDFChecker:
-    """Main class orchestrating the PDF contradiction checking process"""
+            return Fore.RED
     
-    def __init__(self, model_type="claude"):
+    def _get_score_emoji(self, score: float) -> str:
+        """Get emoji based on score"""
+        if score >= 0.9:
+            return "✅"
+        elif score >= 0.7:
+            return "⚠️"
+        else:
+            return "❌"
+    
+    def _format_contradictions_section(self, contradictions: List[Dict]) -> List[str]:
+        """Format contradictions section"""
+        lines = [
+            "",
+            "## ❌ Contradictions",
+            "",
+            f"Found **{len(contradictions)}** contradictions:",
+            ""
+        ]
+        
+        for i, cont in enumerate(contradictions[:5], 1):  # Show first 5
+            lines.extend([
+                f"### Contradiction {i}",
+                f"- **Type**: {cont.get('type', 'unknown')}",
+                f"- **Documents**: {cont.get('doc1_id', '')} ↔ {cont.get('doc2_id', '')}",
+                f"- **Confidence**: {cont.get('confidence', 0):.2%}",
+                f"- **Explanation**: {cont.get('explanation', '')}",
+                ""
+            ])
+        
+        if len(contradictions) > 5:
+            lines.append(f"*... and {len(contradictions) - 5} more contradictions*")
+            lines.append("")
+        
+        return lines
+    
+    def _format_flow_section(self, flow_issues: List[Dict]) -> List[str]:
+        """Format flow issues section"""
+        lines = [
+            "",
+            "## 📊 Content Flow Issues",
+            "",
+            f"Found **{len(flow_issues)}** flow issues:",
+            ""
+        ]
+        
+        # Group by severity
+        by_severity = {'high': [], 'medium': [], 'low': []}
+        for issue in flow_issues:
+            severity = issue.get('severity', 'low')
+            by_severity[severity].append(issue)
+        
+        for severity in ['high', 'medium', 'low']:
+            if by_severity[severity]:
+                lines.append(f"### {severity.capitalize()} Severity ({len(by_severity[severity])})")
+                lines.append("")
+                
+                for issue in by_severity[severity][:3]:  # Show first 3
+                    lines.extend([
+                        f"- **Chapter**: {issue.get('chapter_id', '')}",
+                        f"  - **Type**: {issue.get('issue_type', '')}",
+                        f"  - **Description**: {issue.get('description', '')}",
+                        ""
+                    ])
+        
+        return lines
+    
+    def _format_redundancy_section(self, redundancies: List[Dict]) -> List[str]:
+        """Format redundancy section"""
+        lines = [
+            "",
+            "## 🔁 Redundancy Analysis",
+            "",
+            f"Found **{len(redundancies)}** redundant sections:",
+            ""
+        ]
+        
+        for i, red in enumerate(redundancies[:3], 1):  # Show first 3
+            lines.extend([
+                f"### Redundancy {i}",
+                f"- **Sections**: {red.get('section1_id', '')} ↔ {red.get('section2_id', '')}",
+                f"- **Similarity**: {red.get('similarity_score', 0):.2%}",
+                f"- **Type**: {red.get('type', '')}",
+                f"- **Recommendation**: {red.get('recommendation', '')}",
+                ""
+            ])
+        
+        if len(redundancies) > 3:
+            lines.append(f"*... and {len(redundancies) - 3} more redundancies*")
+            lines.append("")
+        
+        return lines
+    
+    def _format_code_section(self, code_errors: List[Dict]) -> List[str]:
+        """Format code errors section"""
+        lines = [
+            "",
+            "## 🐛 Code Quality Issues",
+            "",
+            f"Found **{len(code_errors)}** code issues:",
+            ""
+        ]
+        
+        # Group by error type
+        by_type = {}
+        for error in code_errors:
+            error_type = error.get('error_type', 'unknown')
+            if error_type not in by_type:
+                by_type[error_type] = []
+            by_type[error_type].append(error)
+        
+        for error_type, errors in by_type.items():
+            lines.append(f"### {error_type.capitalize()} Errors ({len(errors)})")
+            lines.append("")
+            
+            for error in errors[:2]:  # Show first 2 of each type
+                lines.extend([
+                    f"- **Chapter**: {error.get('chapter_id', '')}",
+                    f"  - **Description**: {error.get('description', '')}",
+                    f"  - **Fix**: {error.get('suggested_fix', '')}",
+                    ""
+                ])
+        
+        return lines
+    
+    def _format_theory_section(self, deviations: List[Dict]) -> List[str]:
+        """Format theory deviations section"""
+        lines = [
+            "",
+            "## 📚 Theoretical Accuracy",
+            "",
+            f"Found **{len(deviations)}** deviations from standards:",
+            ""
+        ]
+        
+        # Group by severity
+        critical = [d for d in deviations if d.get('severity') == 'critical']
+        major = [d for d in deviations if d.get('severity') == 'major']
+        
+        if critical:
+            lines.append(f"### Critical Issues ({len(critical)})")
+            lines.append("")
+            
+            for dev in critical[:2]:
+                lines.extend([
+                    f"- **Standard Violated**: {dev.get('standard_violated', '')}",
+                    f"  - **Chapter**: {dev.get('chapter_id', '')}",
+                    f"  - **Explanation**: {dev.get('explanation', '')}",
+                    ""
+                ])
+        
+        if major:
+            lines.append(f"### Major Issues ({len(major)})")
+            lines.append("")
+            
+            for dev in major[:2]:
+                lines.extend([
+                    f"- **Standard Violated**: {dev.get('standard_violated', '')}",
+                    f"  - **Chapter**: {dev.get('chapter_id', '')}",
+                    f"  - **Explanation**: {dev.get('explanation', '')}",
+                    ""
+                ])
+        
+        return lines
+
+class BookKeeperV2:
+    """Main application class for Book Keeper v2.0"""
+    
+    def __init__(self, model_type: str = "claude"):
+        self.model_type = model_type
         self.extractor = PDFChapterExtractor()
-        self.embedding_manager = EmbeddingManager()
         self.vector_store = VectorStore()
-        self.detector = ContradictionDetector(model_type=model_type)
+        self.embedding_manager = EmbeddingManager()
+        self.quality_checker = QualityChecker(model_type)
         self.report_generator = ReportGenerator()
-        self.chapters_map = {}
+        self.logger = logger
     
-    def process_pdfs(self, pdf_folder: str = "pdf", test_mode: bool = False):
-        """Process all PDFs in the specified folder"""
-        pdf_files = list(Path(pdf_folder).glob("*.pdf"))
+    def process_pdfs(self, pdf_dir: str = "pdf", 
+                     check_types: Optional[List[str]] = None,
+                     test_mode: bool = False):
+        """Process all PDFs in directory"""
+        pdf_files = list(Path(pdf_dir).glob("*.pdf"))
         
         if not pdf_files:
-            logger.warning(f"No PDF files found in {pdf_folder}")
+            self.logger.error(f"No PDF files found in {pdf_dir}")
             return
         
-        print(f"\n{Fore.CYAN}Found {len(pdf_files)} PDF file(s) to process{Style.RESET_ALL}")
+        self.logger.info(f"Found {len(pdf_files)} PDF files")
         
         # Extract chapters from all PDFs
         all_chapters = []
-        for pdf_path in tqdm(pdf_files, desc="Extracting chapters"):
-            chapters = self.extractor.extract_chapters(str(pdf_path))
+        for pdf_file in tqdm(pdf_files, desc="Extracting chapters"):
+            chapters = self.extractor.extract_chapters(str(pdf_file))
             all_chapters.extend(chapters)
+            self.logger.info(f"Extracted {len(chapters)} chapters from {pdf_file.name}")
         
-        print(f"\n{Fore.GREEN}Extracted {len(all_chapters)} chapters total{Style.RESET_ALL}")
+        self.logger.info(f"Total chapters extracted: {len(all_chapters)}")
         
-        # Generate embeddings and store in vector DB
-        print(f"\n{Fore.CYAN}Generating embeddings and storing in vector database...{Style.RESET_ALL}")
-        for chapter in tqdm(all_chapters, desc="Processing chapters"):
-            # Get chapter summary for better embedding
-            summary = self._get_chapter_summary(chapter)
-            embedding = self.embedding_manager.get_embedding(summary)
+        # Create embeddings and store in vector DB
+        for chapter in tqdm(all_chapters, desc="Creating embeddings"):
+            embedding = self.embedding_manager.create_embedding(chapter.text)
             self.vector_store.add_chapter(chapter, embedding)
-            self.chapters_map[chapter.get_id()] = chapter
         
-        # Detect contradictions
-        print(f"\n{Fore.CYAN}Analyzing chapters for contradictions...{Style.RESET_ALL}")
-        contradictions = self._detect_all_contradictions(all_chapters, test_mode=test_mode)
+        # Run quality checks
+        report = self.quality_checker.check(
+            all_chapters, 
+            check_types=check_types,
+            test_mode=test_mode
+        )
         
         # Generate reports
-        self.report_generator.generate_json_report(contradictions)
-        self.report_generator.generate_markdown_report(contradictions, self.chapters_map)
-        self.report_generator.print_summary(contradictions)
-        
-        return contradictions
-    
-    def _get_chapter_summary(self, chapter: Chapter) -> str:
-        """Get a summary of chapter content for better embedding"""
-        # Use first 3000 characters as summary
-        # In production, you might want to use LLM to generate actual summary
-        return f"Chapter {chapter.chapter_number}: {chapter.title}\n\n{chapter.content[:3000]}"
-    
-    def _detect_all_contradictions(self, chapters: List[Chapter], test_mode: bool = False) -> List[Contradiction]:
-        """Detect contradictions between all chapter pairs"""
-        contradictions = []
-        total_pairs = len(chapters) * (len(chapters) - 1) // 2
-        
-        # In test mode, only check first 5 pairs
-        if test_mode:
-            total_pairs = min(5, total_pairs)
-        
-        # Add rate limiting configuration
-        api_calls_count = 0
-        api_calls_per_minute = 10  # More conservative limit
-        pairs_checked = 0
-        
-        with tqdm(total=total_pairs, desc="Checking chapter pairs") as pbar:
-            for i in range(len(chapters)):
-                for j in range(i + 1, len(chapters)):
-                    # Stop if we've checked enough pairs in test mode
-                    if test_mode and pairs_checked >= 5:
-                        break
-                    
-                    # Rate limiting
-                    if api_calls_count > 0 and api_calls_count % api_calls_per_minute == 0:
-                        print(f"\n{Fore.YELLOW}Rate limit pause - waiting 60 seconds...{Style.RESET_ALL}")
-                        time.sleep(60)
-                    
-                    try:
-                        contradiction = self.detector.detect_contradiction(chapters[i], chapters[j])
-                        if contradiction and contradiction.confidence_score > 0.6:
-                            contradictions.append(contradiction)
-                            print(f"\n{Fore.RED}Found contradiction between chapters {chapters[i].chapter_number} and {chapters[j].chapter_number}{Style.RESET_ALL}")
-                            
-                            # Save intermediate results
-                            self.report_generator.save_intermediate_results(contradictions)
-                    except Exception as e:
-                        logger.error(f"Error checking chapters {i} and {j}: {e}")
-                    
-                    api_calls_count += 1
-                    pairs_checked += 1
-                    pbar.update(1)
-                    
-                    # Delay between calls to avoid rate limiting
-                    time.sleep(2)  # Increased delay
-                
-                if test_mode and pairs_checked >= 5:
-                    break
-        
-        return contradictions
-
+        self.report_generator.save_json_report(report)
+        self.report_generator.save_markdown_report(report)
+        self.report_generator.print_summary(report)
 
 def main():
     """Main entry point"""
-    print(f"{Fore.CYAN}{'='*60}{Style.RESET_ALL}")
-    print(f"{Fore.CYAN}RAG PDF Checker - Book Contradiction Detector{Style.RESET_ALL}")
-    print(f"{Fore.CYAN}{'='*60}{Style.RESET_ALL}\n")
+    parser = argparse.ArgumentParser(
+        description="Book Keeper v2.0 - Comprehensive PDF Quality Analyzer"
+    )
     
-    # Check for command line arguments
-    import sys
-    test_mode = "--test" in sys.argv
+    # Check types
+    parser.add_argument(
+        '--check',
+        type=str,
+        default='all',
+        help='Check types to run: all (default), contradiction, flow, redundancy, code, theory, or comma-separated list'
+    )
     
-    # Determine model type (default is Claude)
-    if "--openai" in sys.argv or "--gpt" in sys.argv:
-        model_type = "openai"
-        model_name = "GPT-4o"
+    # Model selection
+    parser.add_argument(
+        '--model',
+        choices=['claude', 'openai'],
+        default='claude',
+        help='LLM model to use (default: claude)'
+    )
+    parser.add_argument('--openai', action='store_true', help='Use OpenAI GPT-4o')
+    parser.add_argument('--gpt', action='store_true', help='Use OpenAI GPT-4o (alias)')
+    
+    # Test mode
+    parser.add_argument(
+        '--test',
+        action='store_true',
+        help='Run in test mode (limited scope)'
+    )
+    
+    # PDF directory
+    parser.add_argument(
+        '--pdf-dir',
+        type=str,
+        default='pdf',
+        help='Directory containing PDF files (default: pdf)'
+    )
+    
+    args = parser.parse_args()
+    
+    # Handle model selection
+    if args.openai or args.gpt:
+        model_type = 'openai'
     else:
-        model_type = "claude"
-        model_name = "Claude Sonnet 4"
+        model_type = args.model
     
-    print(f"{Fore.YELLOW}Using {model_name} model{Style.RESET_ALL}")
+    # Parse check types
+    if args.check == 'all':
+        check_types = None  # Comprehensive
+    else:
+        check_types = [t.strip() for t in args.check.split(',')]
     
-    # Check for required environment variables
-    if model_type == "openai" and not os.getenv("OPENAI_API_KEY"):
-        print(f"{Fore.RED}❌ Error: OPENAI_API_KEY not found in environment variables{Style.RESET_ALL}")
-        print("Please create a .env file with your OpenAI API key")
-        return
-    elif model_type == "claude" and not os.getenv("ANTHROPIC_API_KEY"):
-        print(f"{Fore.RED}❌ Error: ANTHROPIC_API_KEY not found in environment variables{Style.RESET_ALL}")
-        print("Please create a .env file with your Anthropic API key")
-        return
+    # Display configuration
+    print(f"\n{Fore.CYAN}Book Keeper v2.0 - Starting Analysis{Style.RESET_ALL}")
+    print(f"Model: {model_type}")
+    print(f"Checks: {args.check}")
+    print(f"Test Mode: {args.test}")
+    print(f"PDF Directory: {args.pdf_dir}\n")
     
-    # Initialize and run the checker
-    checker = RAGPDFChecker(model_type=model_type)
+    # Check environment
+    if model_type == 'claude' and not os.getenv('ANTHROPIC_API_KEY'):
+        logger.error("ANTHROPIC_API_KEY not found in environment")
+        sys.exit(1)
+    elif model_type == 'openai' and not os.getenv('OPENAI_API_KEY'):
+        logger.error("OPENAI_API_KEY not found in environment")
+        sys.exit(1)
     
+    # Run analysis
     try:
-        # Start Qdrant if not running (optional - assumes Docker)
-        print(f"{Fore.YELLOW}Note: Make sure Qdrant is running locally on port 6345{Style.RESET_ALL}")
-        print("You can start it with: docker-compose up -d\n")
-        
-        if test_mode:
-            print(f"{Fore.YELLOW}Running in TEST MODE - will only check first 5 chapter pairs{Style.RESET_ALL}\n")
-        
-        # Process PDFs
-        checker.process_pdfs(test_mode=test_mode)
-        
+        app = BookKeeperV2(model_type=model_type)
+        app.process_pdfs(
+            pdf_dir=args.pdf_dir,
+            check_types=check_types,
+            test_mode=args.test
+        )
     except Exception as e:
-        logger.error(f"Error during processing: {e}")
-        print(f"\n{Fore.RED}❌ Error: {e}{Style.RESET_ALL}")
-
+        logger.error(f"Error during analysis: {e}", exc_info=True)
+        sys.exit(1)
 
 if __name__ == "__main__":
     main() 

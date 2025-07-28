@@ -1,0 +1,98 @@
+{
+  "generated_at": "2025-07-28T14:07:14.823874",
+  "total_chapters": 3,
+  "check_types": [
+    "contradiction",
+    "flow",
+    "redundancy",
+    "code",
+    "theory"
+  ],
+  "contradictions": [],
+  "flow_issues": [
+    {
+      "chapter_id": "Chapter 1",
+      "issue_type": "unclear_progression",
+      "description": "5장의 내용을 참조하고 있으나, 이전 내용에 대한 충분한 맥락이 제공되지 않습니다. 새로운 장의 시작점으로서 독자들에게 더 명확한 방향성을 제시해야 합니다.",
+      "missing_concepts": [],
+      "severity": "medium"
+    },
+    {
+      "chapter_id": "Chapter 2",
+      "issue_type": "missing_prerequisite",
+      "description": "'클린 아키텍처의 동심원 다이어그램'이 이전에 충분히 설명되지 않은 상태에서 언급되고 있습니다.",
+      "missing_concepts": [
+        "동심원 다이어그램의 기본 구조",
+        "실행 순서의 기본 개념"
+      ],
+      "severity": "high"
+    },
+    {
+      "chapter_id": "Chapter 3",
+      "issue_type": "broken_sequence",
+      "description": "프레임워크에 대한 설명이 갑자기 시작되며, 이전 챕터들과의 연결성이 부족합니다. 또한 '페이지 17' 같은 구체적인 페이지 참조는 문서의 유연성을 저해할 수 있습니다.",
+      "missing_concepts": [
+        "프레임워크의 기본 개념"
+      ],
+      "severity": "medium"
+    }
+  ],
+  "redundancies": [],
+  "code_errors": [],
+  "theory_deviations": [
+    {
+      "chapter_id": "4fc0f9e4_5",
+      "excerpt": "컨트롤러는 HTTP 요청(JSON 등)을 받아 유스케이스가 이해할 수 있는 입력 DTO로 변환한다.",
+      "standard_violated": "Single Responsibility Principle",
+      "explanation": "컨트롤러가 HTTP 요청 처리와 DTO 변환이라는 두 가지 책임을 가지고 있습니다. 클린 아키텍처에서는 이러한 변환 책임을 별도의 매퍼나 어댑터에 위임하는 것이 바람직합니다.",
+      "severity": "minor",
+      "correct_approach": "컨트롤러는 요청 라우팅만 담당하고, 별도의 RequestMapper/DTOConverter 클래스를 만들어 변환 로직을 분리하는 것이 좋습니다."
+    },
+    {
+      "chapter_id": "4fc0f9e4_5",
+      "excerpt": "Repository 인터페이스의 구현체(예: MySQLRepository)는 데이터베이스에서 데이터를 가져와 도메인 객체로 변환한다.",
+      "standard_violated": "Interface Segregation Principle",
+      "explanation": "Repository 인터페이스가 데이터 접근과 객체 변환이라는 두 가지 책임을 포함하고 있습니다. 이는 ISP를 위반할 수 있습니다.",
+      "severity": "minor",
+      "correct_approach": "데이터 접근을 위한 Repository 인터페이스와 객체 변환을 위한 Mapper 인터페이스를 분리하여 구현하는 것이 바람직합니다."
+    },
+    {
+      "chapter_id": "4fc0f9e4_5",
+      "excerpt": "프레임워크는 비즈니스 로직(성적 계산) 자체를 처리하지 않고 요청과 응답의 전달만 담당한다.",
+      "standard_violated": "Clean Architecture",
+      "explanation": "이 설명은 정확하지만, 프레임워크와 비즈니스 로직 사이의 의존성 역전 원칙(DIP)과 어댑터 패턴의 구현 방법이 구체적으로 설명되지 않았습니다.",
+      "severity": "minor",
+      "correct_approach": "프레임워크와 비즈니스 로직 사이에 인터페이스/포트를 통한 의존성 역전을 구현하고, 어댑터 패턴을 사용하여 외부 요청을 내부 도메인 모델로 변환하는 과정을 더 자세히 설명해야 합니다."
+    },
+    {
+      "chapter_id": "4fc0f9e4_5",
+      "excerpt": "FastAPI를 사용한 프레임워크 구현",
+      "standard_violated": "Dependency Inversion Principle",
+      "explanation": "특정 프레임워크(FastAPI)에 직접적으로 의존하는 구현 예제를 보여주고 있어, 프레임워크 독립성 원칙을 완전히 준수하지 않습니다.",
+      "severity": "major",
+      "correct_approach": "프레임워크에 독립적인 인터페이스를 먼저 정의하고, FastAPI는 그 구현체 중 하나로 소개하는 것이 더 적절합니다. 이를 통해 프레임워크 교체가 용이한 설계를 보여줄 수 있습니다."
+    }
+  ],
+  "overall_score": 0.89,
+  "subscores": {
+    "contradiction": 1.0,
+    "flow": 0.6,
+    "redundancy": 1.0,
+    "code": 1.0,
+    "theory": 0.8500000000000001
+  },
+  "summary": {
+    "total_issues": 7,
+    "issues_by_type": {
+      "contradiction": 0,
+      "flow": 3,
+      "redundancy": 0,
+      "code": 0,
+      "theory": 4
+    },
+    "quality_assessment": "Good",
+    "key_insights": [
+      "1 high-severity flow issues detected"
+    ]
+  }
+}

@@ -1,14 +1,24 @@
-# Book Keeper - PDF Contradiction Detector 📚🔍
+# Book Keeper - PDF Quality Analyzer 📚🔍
 
-An AI-powered quality assurance tool that automatically detects logical contradictions between chapters in software design PDF books.
+**Book Keeper v2.0** - A comprehensive AI-powered quality assurance tool that analyzes PDF documents for contradictions, content flow, redundancy, code quality, and theoretical accuracy.
 
 ## ✨ Features
 
-- 📄 **Automatic PDF Chapter Extraction**: Supports various chapter delimiter patterns (English/Korean)
+### Core Analysis Modules
+
+1. **📚 Contradiction Detection**: Identifies logical contradictions between chapters
+2. **📊 Flow Analysis**: Checks content progression and prerequisite violations  
+3. **🔁 Redundancy Detection**: Finds duplicate or unnecessarily repeated content
+4. **🐛 Code Validation**: Validates code snippets for syntax and best practices
+5. **📖 Theory Verification**: Verifies against software engineering standards (SOLID, Design Patterns, etc.)
+
+### Technical Features
+
+- 📄 **Automatic PDF Chapter Extraction**: Supports various chapter delimiter patterns
 - 🧠 **Vector Embeddings**: Semantic text analysis using OpenAI Embeddings API
 - 🗄️ **Vector Database**: Efficient similarity search powered by Qdrant
-- 🤖 **LLM-based Contradiction Detection**: Sophisticated logical contradiction analysis using GPT-4o or Claude Sonnet 4
-- 📊 **Multiple Report Formats**: Detailed analysis reports in JSON and Markdown formats
+- 🤖 **Dual LLM Support**: Choose between Claude 3.5 Sonnet (default) or GPT-4o
+- 📊 **Comprehensive Reports**: JSON and Markdown formats with quality scores
 - 🌍 **Multilingual Support**: Works with PDFs in multiple languages
 
 ## 📋 System Requirements
@@ -17,242 +27,165 @@ An AI-powered quality assurance tool that automatically detects logical contradi
 - Conda (Anaconda or Miniconda)
 - Docker (for running Qdrant)
 - API Keys:
-  - ANTHROPIC_API_KEY (for Claude Sonnet 4 - default)
+  - ANTHROPIC_API_KEY (for Claude 3.5 Sonnet - default)
   - OPENAI_API_KEY (for GPT-4o - optional)
 
 ## 🚀 Quick Start
 
-### 1. Clone the Repository
+### 1. Clone the repository
 ```bash
 git clone https://github.com/no-ai-labs/book-keeper.git
 cd book-keeper
 ```
 
-### 2. Set up Environment
+### 2. Set up the environment
 ```bash
-# Run the setup script
-./setup.sh
+# Install Conda (if not already installed)
+./install_conda.sh  # macOS only
 
-# Or manually create conda environment
-conda env create -f environment.yml
+# Create and activate the environment
+./setup.sh
 conda activate book-keeper
 ```
 
-### 3. Configure API Keys
+### 3. Configure environment variables
 ```bash
 cp .env_example .env
-# Edit .env file and add your API keys:
-# - ANTHROPIC_API_KEY (for Claude Sonnet 4 - default)
+# Edit .env and add your API keys:
+# - ANTHROPIC_API_KEY (for Claude - default)
 # - OPENAI_API_KEY (for GPT-4o - optional)
 ```
 
 ### 4. Start Qdrant
-
-#### Option 1: Using Docker Compose (Recommended)
 ```bash
-# Start Qdrant with Docker Compose
 docker-compose up -d
-
-# Check logs
-docker-compose logs -f qdrant
-
-# Stop
-docker-compose down
 ```
 
-#### Option 2: Direct Docker Run
-```bash
-# Start Qdrant using Docker
-docker run -p 6345:6333 -p 6346:6334 \
-  -v $(pwd)/data/qdrant:/qdrant/storage:z \
-  qdrant/qdrant
-```
-
-### 5. Run PDF Analysis
-
-#### Test Mode (Recommended - Prevents Rate Limiting)
-```bash
-# Using Claude Sonnet 4 (default)
-./run_test.sh
-
-# Using GPT-4o
-./run_test.sh --openai
-
-# Or run directly
-python rag_pdf_checker.py --test          # Claude Sonnet 4 (default)
-python rag_pdf_checker.py --test --openai # GPT-4o
-python rag_pdf_checker.py --test --gpt    # GPT-4o (alias)
-```
-
-#### Full Analysis
-```bash
-# Analyze all chapter pairs using Claude Sonnet 4 (default)
-python rag_pdf_checker.py
-
-# Analyze using GPT-4o
-python rag_pdf_checker.py --openai
-```
+### 5. Place PDF files
+Put your PDF files in the `pdf/` directory.
 
 ## 📖 Usage
 
-### Basic Usage
+### Comprehensive Analysis (Default)
+Runs all quality checks:
 
-1. Place your PDF files in the `pdf/` directory
-2. Run the script to automatically:
-   - Extract chapters from each PDF
-   - Generate embeddings for each chapter
-   - Store embeddings in vector database
-   - Check all chapter pairs for contradictions
-   - Generate analysis reports
-
-### Supported Chapter Patterns
-
-- `Chapter 1`, `CHAPTER I` (English)
-- `1장`, `제1장` (Korean)
-- `1. Title` (Numeric format)
-- `PART 1` (Part divisions)
-
-## 📊 Output Files
-
-### 1. contradictions.json
-```json
-{
-  "generated_at": "2024-01-01T10:00:00",
-  "total_contradictions": 2,
-  "contradictions": [
-    {
-      "doc1_id": "book_1_hash",
-      "doc2_id": "book_4_hash",
-      "type": "definition",
-      "confidence": 0.85,
-      "explanation": "Explanation of the contradiction in Korean"
-    }
-  ]
-}
-```
-
-### 2. contradictions_report.md
-A simple markdown report with basic analysis results
-
-### 3. Console Output
-Color-coded summary information in the terminal
-
-### 4. contradictions_detailed_report.md (Generated by show_results.py)
 ```bash
-# View results and generate detailed report
-python show_results.py
+python rag_pdf_checker.py
 ```
-- Displays results in console and generates detailed markdown report
-- Enhanced readability with emojis and structured sections
-- Includes detailed analysis per contradiction, statistics by type, and conclusions
 
-## 📁 Project Structure
+### Specific Checks
+Run only selected analyzers:
+
+```bash
+# Single check
+python rag_pdf_checker.py --check contradiction
+
+# Multiple checks
+python rag_pdf_checker.py --check contradiction,flow,code
+
+# Available checks: contradiction, flow, redundancy, code, theory
+```
+
+### Test Mode
+Limited analysis for testing (first 3 chapters only):
+
+```bash
+# Test with default model (Claude)
+python rag_pdf_checker.py --test
+
+# Test with GPT-4o
+python rag_pdf_checker.py --test --openai
+```
+
+### Model Selection
+```bash
+# Use Claude 3.5 Sonnet (default)
+python rag_pdf_checker.py
+
+# Use GPT-4o
+python rag_pdf_checker.py --openai
+# or
+python rag_pdf_checker.py --gpt
+```
+
+### Custom PDF Directory
+```bash
+python rag_pdf_checker.py --pdf-dir /path/to/pdfs
+```
+
+## 📊 Output
+
+The tool generates two report files:
+
+### 1. `quality_report_v2.json`
+Detailed JSON report with all findings and scores.
+
+### 2. `quality_report_v2.md`
+Beautiful Markdown report with:
+- 🎯 Overall quality score (0-100%)
+- 📈 Individual module scores
+- 📋 Detailed findings by category
+- 🔍 Key insights summary
+
+### Quality Scoring
+
+- **90-100%**: Excellent ✅
+- **80-89%**: Good ⚠️
+- **70-79%**: Fair ⚠️
+- **60-69%**: Needs Improvement ❌
+- **Below 60%**: Poor ❌
+
+## 🗂️ Project Structure
 
 ```
 book-keeper/
-├── pdf/                              # Place PDF files here
-├── rag_pdf_checker.py               # Main script
-├── environment.yml                   # Conda environment configuration
-├── requirements.txt                  # Python package list
-├── setup.sh                          # Automated setup script
-├── run_test.sh                      # Test mode runner
-├── show_results.py                  # Result viewer and report generator
-├── monitor_results.py               # Real-time result monitoring
-├── analyze_chapters.py              # Extracted chapter analysis
-├── test_system.py                   # System test utility
-├── .env_example                     # Environment variables template
-├── docker-compose.yml               # Qdrant Docker configuration
-├── contradictions.json              # JSON results (generated)
-├── contradictions_report.md         # Simple markdown report (generated)
-└── contradictions_detailed_report.md # Detailed markdown report (generated)
+├── rag_pdf_checker.py      # Main v2.0 application
+├── analyzers/              # Analysis modules
+│   ├── base.py            # Base analyzer class
+│   ├── contradiction.py   # Contradiction detector
+│   ├── flow.py           # Content flow analyzer
+│   ├── redundancy.py     # Redundancy detector
+│   ├── code.py           # Code validator
+│   └── theory.py         # Theory verifier
+├── pdf/                   # PDF files directory
+├── environment.yml        # Conda environment
+├── requirements.txt       # Python dependencies
+├── docker-compose.yml     # Qdrant setup
+└── quality_report_v2.*    # Generated reports
 ```
 
-## ⚙️ Advanced Configuration
+## 🔧 Advanced Settings
 
-### Custom Embedding Models
-```python
-# Using HuggingFace models (not yet implemented)
-embedding_manager = EmbeddingManager(model_type="huggingface")
-```
-
-### Adjusting Contradiction Detection Threshold
-```python
-# In _detect_all_contradictions method
-if contradiction and contradiction.confidence_score > 0.6:  # Default: 0.6
-```
-
-## 🎨 UI Interfaces (Optional)
-
-### Gradio UI
+### Environment Variables (.env)
 ```bash
-python ui_gradio.py
+# API Keys
+ANTHROPIC_API_KEY=your_key_here
+OPENAI_API_KEY=your_key_here
+
+# Qdrant Configuration
+QDRANT_HOST=localhost
+QDRANT_PORT=6345
+QDRANT_API_KEY=optional_key
 ```
 
-### Streamlit UI
-```bash
-streamlit run ui_streamlit.py
-```
-
-## ⚠️ Important Notes
-
-- API usage may incur costs (OpenAI/Anthropic)
-- Processing large PDFs can be time-consuming
-- Qdrant must be running locally before analysis
-- Rate limiting is applied to prevent API throttling
-
-## 🔧 Troubleshooting
-
-### Qdrant Connection Error
-```bash
-# Check if Qdrant is running
-docker ps | grep qdrant
-
-# If port is already in use
-lsof -i :6345
-```
-
-### API Errors
-- Verify API keys are correctly set in `.env`
-- Check API usage limits and quotas
-- Ensure network connectivity
-
-### macOS Users
-If you encounter SSL certificate errors:
-```bash
-pip install --upgrade certifi
-```
+### Docker Compose Configuration
+The `docker-compose.yml` configures Qdrant with:
+- REST API on port 6345
+- gRPC on port 6346
+- Persistent storage in `./data/qdrant`
+- Health checks
+- Auto-restart
 
 ## 🤝 Contributing
 
-We welcome contributions! Please feel free to submit:
-- Bug reports
-- Feature requests
-- Pull requests
-- Documentation improvements
-
-### Development Setup
-```bash
-# Create development branch
-git checkout -b feature/your-feature
-
-# Install in development mode
-pip install -e .
-
-# Run tests
-python -m pytest tests/
-```
+Contributions are welcome! Please feel free to submit a Pull Request.
 
 ## 📜 License
 
-MIT License - see [LICENSE](LICENSE) file for details
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
 ## 🙏 Acknowledgments
 
-- Built with Claude Opus 4 and human creativity
-- Special thanks to the Mentat system architects
-- Powered by Qdrant vector database
-- LLM capabilities by Anthropic and OpenAI
-
----
-
-**Book Keeper** - Making technical documentation better, one contradiction at a time! 🚀 
+- Built with Claude 4 Opus and Claude 3.5 Sonnet
+- Powered by OpenAI Embeddings
+- Vector search by Qdrant 
