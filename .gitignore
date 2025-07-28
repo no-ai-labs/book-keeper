@@ -49,6 +49,9 @@ contradictions_detailed_report.md
 *.pdf
 pdf/
 result.md
+quality_report_v2.json
+quality_report_v2.md
+book_keeper_v2.log
 
 # Conda
 Miniconda3-latest-*.sh
