@@ -29,7 +29,8 @@ from analyzers import (
     FlowAnalyzer,
     RedundancyAnalyzer,
     CodeAnalyzer,
-    TheoryAnalyzer
+    TheoryAnalyzer,
+    TerminologyAnalyzer
 )
 
 # Initialize colorama
@@ -78,6 +79,7 @@ class ComprehensiveReport:
     redundancies: Optional[List[Dict[str, Any]]] = None
     code_errors: Optional[List[Dict[str, Any]]] = None
     theory_deviations: Optional[List[Dict[str, Any]]] = None
+    terminology_inconsistencies: Optional[List[Dict[str, Any]]] = None
     
     # Overall scores
     overall_score: float = 0.0
@@ -233,7 +235,8 @@ class QualityChecker:
             'flow': FlowAnalyzer(model_type),
             'redundancy': RedundancyAnalyzer(model_type),
             'code': CodeAnalyzer(model_type),
-            'theory': TheoryAnalyzer(model_type)
+            'theory': TheoryAnalyzer(model_type),
+            'terminology': TerminologyAnalyzer(model_type)
         }
         self.logger = logger
     
@@ -276,7 +279,11 @@ class QualityChecker:
                     result = analyzer.analyze(chapters)
                 
                 # Store results
-                results[check_type] = result.details
+                if check_type == 'terminology':
+                    # Terminology returns details as dict with 'inconsistencies' key
+                    results[check_type] = result.details.get('inconsistencies', [])
+                else:
+                    results[check_type] = result.details
                 subscores[check_type] = result.confidence_score
                 
                 # Log summary
@@ -309,6 +316,8 @@ class QualityChecker:
             report.code_errors = results['code']
         if 'theory' in results:
             report.theory_deviations = results['theory']
+        if 'terminology' in results:
+            report.terminology_inconsistencies = results['terminology']
         
         return report
     
@@ -339,7 +348,21 @@ class QualityChecker:
             if syntax_errors > 0:
                 insights.append(f"{syntax_errors} syntax errors in code examples")
         
-        summary['key_insights'] = insights
+        if 'theory' in results and results['theory']:
+            theory_issues = results['theory']
+            critical = len([t for t in theory_issues if t.get('severity') == 'critical'])
+            if critical > 0:
+                insights.append(f"{critical} critical theoretical accuracy issues")
+        
+        if 'terminology' in results and results['terminology']:
+            term_issues = results['terminology']
+            high_severity = len([t for t in term_issues if t.get('severity') == 'high'])
+            if high_severity > 0:
+                insights.append(f"{high_severity} high-severity terminology inconsistencies")
+            else:
+                insights.append(f"Found {len(term_issues)} terminology variations")
+        
+        summary["key_insights"] = insights
         
         return summary
     
@@ -364,16 +387,21 @@ class ReportGenerator:
     def __init__(self):
         self.logger = logger
     
-    def save_json_report(self, report: ComprehensiveReport, filename: str = "quality_report_v2.json"):
+    def save_json_report(self, report: ComprehensiveReport, chapter_map: Optional[Dict] = None,
+                        filename: str = "quality_report_v2.json"):
         """Save report as JSON"""
         report_dict = asdict(report)
+        
+        # Add chapter mapping info to report
+        if chapter_map:
+            report_dict['chapter_info'] = chapter_map
         
         with open(filename, 'w', encoding='utf-8') as f:
             json.dump(report_dict, f, ensure_ascii=False, indent=2)
         
         self.logger.info(f"JSON report saved to {filename}")
     
-    def save_markdown_report(self, report: ComprehensiveReport, 
+    def save_markdown_report(self, report: ComprehensiveReport, chapter_map: Optional[Dict] = None,
                            filename: str = "quality_report_v2.md"):
         """Save report as Markdown"""
         lines = [
@@ -412,19 +440,33 @@ class ReportGenerator:
         
         # Detailed sections
         if report.contradictions:
-            lines.extend(self._format_contradictions_section(report.contradictions))
+            lines.extend(self._format_contradictions_section(report.contradictions, chapter_map))
         
         if report.flow_issues:
-            lines.extend(self._format_flow_section(report.flow_issues))
+            lines.extend(self._format_flow_section(report.flow_issues, chapter_map))
         
         if report.redundancies:
-            lines.extend(self._format_redundancy_section(report.redundancies))
+            lines.extend(self._format_redundancy_section(report.redundancies, chapter_map))
         
         if report.code_errors:
-            lines.extend(self._format_code_section(report.code_errors))
+            lines.extend(self._format_code_section(report.code_errors, chapter_map))
         
         if report.theory_deviations:
-            lines.extend(self._format_theory_section(report.theory_deviations))
+            lines.extend(self._format_theory_section(report.theory_deviations, chapter_map))
+        
+        if report.terminology_inconsistencies:
+            lines.extend(self._format_terminology_section(report.terminology_inconsistencies, chapter_map))
+        
+        # Add note at the end
+        lines.extend([
+            "",
+            "---",
+            "",
+            "📌 **Note**: This summary shows all issues found. For the complete analysis with detailed explanations, please refer to:",
+            "- `quality_report_v2.json` - Full JSON report with all data",
+            "- The console output during analysis contains real-time progress information",
+            ""
+        ])
         
         # Write report
         with open(filename, 'w', encoding='utf-8') as f:
@@ -483,7 +525,7 @@ class ReportGenerator:
         else:
             return "❌"
     
-    def _format_contradictions_section(self, contradictions: List[Dict]) -> List[str]:
+    def _format_contradictions_section(self, contradictions: List[Dict], chapter_map: Optional[Dict]) -> List[str]:
         """Format contradictions section"""
         lines = [
             "",
@@ -493,23 +535,42 @@ class ReportGenerator:
             ""
         ]
         
-        for i, cont in enumerate(contradictions[:5], 1):  # Show first 5
+        # Show all contradictions, not just first 5
+        for i, cont in enumerate(contradictions, 1):
+            doc1_id = cont.get('doc1_id', '')
+            doc2_id = cont.get('doc2_id', '')
+            
+            # Get chapter info
+            doc1_info = self._get_chapter_info(doc1_id, chapter_map)
+            doc2_info = self._get_chapter_info(doc2_id, chapter_map)
+            
             lines.extend([
                 f"### Contradiction {i}",
                 f"- **Type**: {cont.get('type', 'unknown')}",
-                f"- **Documents**: {cont.get('doc1_id', '')} ↔ {cont.get('doc2_id', '')}",
+                f"- **Documents**: {doc1_info} ↔ {doc2_info}",
                 f"- **Confidence**: {cont.get('confidence', 0):.2%}",
                 f"- **Explanation**: {cont.get('explanation', '')}",
                 ""
             ])
-        
-        if len(contradictions) > 5:
-            lines.append(f"*... and {len(contradictions) - 5} more contradictions*")
-            lines.append("")
+            
+            # Add excerpts if available
+            if cont.get('doc1_excerpt'):
+                lines.extend([
+                    f"  **첫 번째 문서 발췌:**",
+                    f"  > {cont.get('doc1_excerpt')}",
+                    ""
+                ])
+            
+            if cont.get('doc2_excerpt'):
+                lines.extend([
+                    f"  **두 번째 문서 발췌:**",
+                    f"  > {cont.get('doc2_excerpt')}",
+                    ""
+                ])
         
         return lines
     
-    def _format_flow_section(self, flow_issues: List[Dict]) -> List[str]:
+    def _format_flow_section(self, flow_issues: List[Dict], chapter_map: Optional[Dict]) -> List[str]:
         """Format flow issues section"""
         lines = [
             "",
@@ -530,17 +591,20 @@ class ReportGenerator:
                 lines.append(f"### {severity.capitalize()} Severity ({len(by_severity[severity])})")
                 lines.append("")
                 
-                for issue in by_severity[severity][:3]:  # Show first 3
+                for issue in by_severity[severity]:
+                    chapter_id = issue.get('chapter_id', 'Unknown')
+                    chapter_info = self._get_chapter_info(chapter_id, chapter_map)
+                    
                     lines.extend([
-                        f"- **Chapter**: {issue.get('chapter_id', '')}",
-                        f"  - **Type**: {issue.get('issue_type', '')}",
+                        f"- **Chapter**: {chapter_info}",
+                        f"  - **Type**: {issue.get('type', 'unknown')}",
                         f"  - **Description**: {issue.get('description', '')}",
                         ""
                     ])
         
         return lines
     
-    def _format_redundancy_section(self, redundancies: List[Dict]) -> List[str]:
+    def _format_redundancy_section(self, redundancies: List[Dict], chapter_map: Optional[Dict]) -> List[str]:
         """Format redundancy section"""
         lines = [
             "",
@@ -550,23 +614,29 @@ class ReportGenerator:
             ""
         ]
         
-        for i, red in enumerate(redundancies[:3], 1):  # Show first 3
+        for i, red in enumerate(redundancies, 1):
+            seg1_id = red.get('segment1_id', '')
+            seg2_id = red.get('segment2_id', '')
+            
+            # Extract chapter IDs from segment IDs
+            ch1_id = seg1_id.split('_seg')[0] if '_seg' in seg1_id else seg1_id
+            ch2_id = seg2_id.split('_seg')[0] if '_seg' in seg2_id else seg2_id
+            
+            ch1_info = self._get_chapter_info(ch1_id, chapter_map)
+            ch2_info = self._get_chapter_info(ch2_id, chapter_map)
+            
             lines.extend([
                 f"### Redundancy {i}",
-                f"- **Sections**: {red.get('section1_id', '')} ↔ {red.get('section2_id', '')}",
-                f"- **Similarity**: {red.get('similarity_score', 0):.2%}",
-                f"- **Type**: {red.get('type', '')}",
+                f"- **Sections**: {ch1_info} ({seg1_id.split('_seg')[-1] if '_seg' in seg1_id else ''}) ↔ {ch2_info} ({seg2_id.split('_seg')[-1] if '_seg' in seg2_id else ''})",
+                f"- **Similarity**: {red.get('similarity', 0):.2%}",
+                f"- **Type**: {red.get('type', 'unknown')}",
                 f"- **Recommendation**: {red.get('recommendation', '')}",
                 ""
             ])
         
-        if len(redundancies) > 3:
-            lines.append(f"*... and {len(redundancies) - 3} more redundancies*")
-            lines.append("")
-        
         return lines
     
-    def _format_code_section(self, code_errors: List[Dict]) -> List[str]:
+    def _format_code_section(self, code_errors: List[Dict], chapter_map: Optional[Dict]) -> List[str]:
         """Format code errors section"""
         lines = [
             "",
@@ -576,29 +646,32 @@ class ReportGenerator:
             ""
         ]
         
-        # Group by error type
-        by_type = {}
+        # Group by severity
+        by_severity = {'error': [], 'warning': []}
         for error in code_errors:
-            error_type = error.get('error_type', 'unknown')
-            if error_type not in by_type:
-                by_type[error_type] = []
-            by_type[error_type].append(error)
+            severity = 'error' if error.get('error_type') == 'syntax' else 'warning'
+            by_severity[severity].append(error)
         
-        for error_type, errors in by_type.items():
-            lines.append(f"### {error_type.capitalize()} Errors ({len(errors)})")
-            lines.append("")
-            
-            for error in errors[:2]:  # Show first 2 of each type
-                lines.extend([
-                    f"- **Chapter**: {error.get('chapter_id', '')}",
-                    f"  - **Description**: {error.get('description', '')}",
-                    f"  - **Fix**: {error.get('suggested_fix', '')}",
-                    ""
-                ])
+        for severity in ['error', 'warning']:
+            if by_severity[severity]:
+                lines.append(f"### {severity.capitalize()}s ({len(by_severity[severity])})")
+                lines.append("")
+                
+                for error in by_severity[severity]:
+                    chapter_id = error.get('chapter_id', '')
+                    chapter_info = self._get_chapter_info(chapter_id, chapter_map)
+                    
+                    lines.extend([
+                        f"- **Chapter**: {chapter_info}",
+                        f"  - **Type**: {error.get('error_type', 'unknown')}",
+                        f"  - **Line**: {error.get('line_number', 'N/A')}",
+                        f"  - **Message**: {error.get('message', '')}",
+                        ""
+                    ])
         
         return lines
     
-    def _format_theory_section(self, deviations: List[Dict]) -> List[str]:
+    def _format_theory_section(self, deviations: List[Dict], chapter_map: Optional[Dict]) -> List[str]:
         """Format theory deviations section"""
         lines = [
             "",
@@ -609,46 +682,106 @@ class ReportGenerator:
         ]
         
         # Group by severity
-        critical = [d for d in deviations if d.get('severity') == 'critical']
-        major = [d for d in deviations if d.get('severity') == 'major']
+        by_severity = {'critical': [], 'major': [], 'minor': []}
+        for dev in deviations:
+            severity = dev.get('severity', 'minor')
+            by_severity[severity].append(dev)
         
-        if critical:
-            lines.append(f"### Critical Issues ({len(critical)})")
-            lines.append("")
-            
-            for dev in critical[:2]:
-                lines.extend([
-                    f"- **Standard Violated**: {dev.get('standard_violated', '')}",
-                    f"  - **Chapter**: {dev.get('chapter_id', '')}",
-                    f"  - **Explanation**: {dev.get('explanation', '')}",
-                    ""
-                ])
-        
-        if major:
-            lines.append(f"### Major Issues ({len(major)})")
-            lines.append("")
-            
-            for dev in major[:2]:
-                lines.extend([
-                    f"- **Standard Violated**: {dev.get('standard_violated', '')}",
-                    f"  - **Chapter**: {dev.get('chapter_id', '')}",
-                    f"  - **Explanation**: {dev.get('explanation', '')}",
-                    ""
-                ])
+        for severity in ['critical', 'major', 'minor']:
+            if by_severity[severity]:
+                lines.append(f"### {severity.capitalize()} Issues ({len(by_severity[severity])})")
+                lines.append("")
+                
+                for dev in by_severity[severity]:
+                    chapter_id = dev.get('chapter_id', '')
+                    chapter_info = self._get_chapter_info(chapter_id, chapter_map)
+                    
+                    lines.extend([
+                        f"- **Standard Violated**: {dev.get('standard_violated', 'unknown')}",
+                        f"  - **Chapter**: {chapter_info}",
+                        f"  - **Explanation**: {dev.get('explanation', '')}",
+                        ""
+                    ])
         
         return lines
 
+    def _format_terminology_section(self, inconsistencies: List[Dict], chapter_map: Optional[Dict]) -> List[str]:
+        """Format terminology inconsistencies section"""
+        lines = [
+            "",
+            "## 📝 Terminology Consistency",
+            "",
+            f"Found **{len(inconsistencies)}** terminology inconsistencies:",
+            ""
+        ]
+        
+        # Group by severity
+        by_severity = {'high': [], 'medium': [], 'low': []}
+        for inc in inconsistencies:
+            severity = inc.get('severity', 'medium')
+            by_severity[severity].append(inc)
+        
+        for severity in ['high', 'medium', 'low']:
+            if by_severity[severity]:
+                lines.append(f"### {severity.capitalize()} Severity ({len(by_severity[severity])})")
+                lines.append("")
+                
+                for inc in by_severity[severity]:
+                    term_variations = inc.get('term_variations', [])
+                    canonical = inc.get('canonical_term', '')
+                    chapters_usage = inc.get('chapters_usage', {})
+                    
+                    lines.extend([
+                        f"- **Concept**: {canonical}",
+                        f"  - **Variations Found**: {', '.join(term_variations)}",
+                        f"  - **Explanation**: {inc.get('explanation', '')}",
+                    ])
+                    
+                    # Show which chapters use which terms
+                    if chapters_usage:
+                        lines.append("  - **Usage by Chapter**:")
+                        for chapter_id, terms in chapters_usage.items():
+                            chapter_info = self._get_chapter_info(chapter_id, chapter_map)
+                            lines.append(f"    - {chapter_info}: {', '.join(terms)}")
+                    
+                    lines.append("")
+        
+        return lines
+
+    def _get_chapter_info(self, chapter_id: str, chapter_map: Optional[Dict]) -> str:
+        """Get readable chapter information from ID"""
+        if not chapter_map or chapter_id not in chapter_map:
+            return chapter_id
+        
+        info = chapter_map[chapter_id]
+        file_name = info['file_name'].replace('.pdf', '')
+        title = info['title']
+        chapter_num = info['chapter_number']
+        
+        # Remove UUID prefix from filename for readability
+        if '_' in file_name:
+            readable_name = '_'.join(file_name.split('_')[1:])
+        else:
+            readable_name = file_name
+        
+        # Truncate title if too long
+        if title and len(title) > 50:
+            title = title[:50] + "..."
+        
+        # Format: "filename (Chapter X)"
+        return f"{readable_name} (Chapter {chapter_num})"
+
 class BookKeeperV2:
-    """Main application class for Book Keeper v2.0"""
+    """Main application class for comprehensive PDF quality analysis"""
     
-    def __init__(self, model_type: str = "claude"):
-        self.model_type = model_type
-        self.extractor = PDFChapterExtractor()
-        self.vector_store = VectorStore()
+    def __init__(self, model_type: str = "claude", qdrant_host: str = "localhost", qdrant_port: int = 6345):
+        self.logger = logger
+        self.pdf_extractor = PDFChapterExtractor()
         self.embedding_manager = EmbeddingManager()
+        self.vector_store = VectorStore(host=qdrant_host, port=qdrant_port)
         self.quality_checker = QualityChecker(model_type)
         self.report_generator = ReportGenerator()
-        self.logger = logger
+        self.chapter_map = {}  # Map chapter ID to chapter info
     
     def process_pdfs(self, pdf_dir: str = "pdf", 
                      check_types: Optional[List[str]] = None,
@@ -665,7 +798,7 @@ class BookKeeperV2:
         # Extract chapters from all PDFs
         all_chapters = []
         for pdf_file in tqdm(pdf_files, desc="Extracting chapters"):
-            chapters = self.extractor.extract_chapters(str(pdf_file))
+            chapters = self.pdf_extractor.extract_chapters(str(pdf_file))
             all_chapters.extend(chapters)
             self.logger.info(f"Extracted {len(chapters)} chapters from {pdf_file.name}")
         
@@ -675,6 +808,12 @@ class BookKeeperV2:
         for chapter in tqdm(all_chapters, desc="Creating embeddings"):
             embedding = self.embedding_manager.create_embedding(chapter.text)
             self.vector_store.add_chapter(chapter, embedding)
+            # Store chapter mapping
+            self.chapter_map[chapter.get_id()] = {
+                'file_name': chapter.file_name,
+                'title': chapter.title,
+                'chapter_number': chapter.chapter_number
+            }
         
         # Run quality checks
         report = self.quality_checker.check(
@@ -683,9 +822,9 @@ class BookKeeperV2:
             test_mode=test_mode
         )
         
-        # Generate reports
-        self.report_generator.save_json_report(report)
-        self.report_generator.save_markdown_report(report)
+        # Generate reports with chapter mapping
+        self.report_generator.save_json_report(report, self.chapter_map)
+        self.report_generator.save_markdown_report(report, self.chapter_map)
         self.report_generator.print_summary(report)
 
 def main():
