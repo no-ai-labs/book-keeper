@@ -11,6 +11,7 @@
 3. **🔁 Redundancy Detection**: Finds duplicate or unnecessarily repeated content
 4. **🐛 Code Validation**: Validates code snippets for syntax and best practices
 5. **📖 Theory Verification**: Verifies against software engineering standards (SOLID, Design Patterns, etc.)
+6. **📝 Terminology Consistency**: Ensures consistent use of technical terms throughout the document
 
 ### Technical Features
 
@@ -83,7 +84,7 @@ python rag_pdf_checker.py --check contradiction
 # Multiple checks
 python rag_pdf_checker.py --check contradiction,flow,code
 
-# Available checks: contradiction, flow, redundancy, code, theory
+# Available checks: contradiction, flow, redundancy, code, theory, terminology
 ```
 
 ### Test Mode
